@@ -7,7 +7,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -38,11 +37,8 @@ func CheckParallel(url string) (bool, http.Response) {
 }
 
 func validateDestination(destination string) bool {
-	if inf, err := os.Stat(destination); err == nil && inf.IsDir() {
-		return true
-	} else {
-		return false
-	}
+	inf, err := os.Stat(destination)
+	return !(err == nil && inf.IsDir())
 }
 
 func bytesSeperator(process int, length int) []string {
@@ -68,28 +64,8 @@ func NormalDownload(url string, path string, head http.Response) {
 	resp, err := http.Get(url)
 
 	if err == nil && resp.StatusCode == 200 {
-		var destination string
 
-		//Path Solving
-		if path == "" {
-			if name := head.Header.Get("Content-Disposition"); name != "" { // Support by website, HTTP Header
-				destination = strings.Split(name, "filename=")[1]
-			} else {
-				destination = head.Request.URL.Path[strings.LastIndex(head.Request.URL.Path, "/")+1:]
-			}
-		} else {
-			if validateDestination(path) {
-				if name := head.Header.Get("Content-Disposition"); name != "" {
-					destination = filepath.Join(destination, strings.Split(name, "filename=")[1])
-				} else {
-					destination = filepath.Join(destination, head.Request.URL.Path[strings.LastIndex(head.Request.URL.Path, "/")+1:])
-				}
-			} else if filepath.Ext(path) == "" {
-				os.Mkdir(path, 0777)
-			} else {
-				destination = path
-			}
-		}
+		destination := pathSolving(path, head)
 
 		fmt.Println("Save to", destination)
 
@@ -111,8 +87,7 @@ type parallelReturnObj struct {
 	id   int
 }
 
-func PrepareParallel(url string, path string, head http.Response) {
-	sep := bytesSeperator(6, int(head.ContentLength))
+func pathSolving(path string, head http.Response) string {
 
 	var destination string
 
@@ -124,17 +99,19 @@ func PrepareParallel(url string, path string, head http.Response) {
 		}
 	} else {
 		if validateDestination(path) {
-			if name := head.Header.Get("Content-Disposition"); name != "" {
-				destination = filepath.Join(destination, strings.Split(name, "filename=")[1])
-			} else {
-				destination = filepath.Join(destination, head.Request.URL.Path[strings.LastIndex(head.Request.URL.Path, "/")+1:])
-			}
-		} else if filepath.Ext(path) == "" {
-			os.Mkdir(path, 0777)
-		} else {
 			destination = path
+		} else {
+			log.Fatal(path, " is a directory")
 		}
 	}
+	return destination
+}
+
+func PrepareParallel(url string, path string, head http.Response) {
+	sep := bytesSeperator(6, int(head.ContentLength))
+
+	destination := pathSolving(path, head)
+
 	fmt.Println("Save to", destination)
 
 	parallelReturn := make(chan parallelReturnObj)
@@ -173,7 +150,7 @@ func parallelDownload(url string, bytesRange string, id int, bar *progressbar.Pr
 		log.Fatal(err)
 	}
 	if resp.StatusCode != 206 { // bytes support, Check MDN doc
-		log.Fatal("Does not support")
+		log.Fatal("HTTP", resp.StatusCode, "Does not support parallel")
 	}
 
 	prReturn := new(parallelReturnObj)

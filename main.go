@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
 
 	"github.com/jasinco/BGDC/core"
 )
@@ -19,6 +18,5 @@ func init() {
 func main() {
 	flag.Parse()
 	url = flag.Arg(0)
-	fmt.Println(url)
 	core.DownloadHandle(url, path)
 }
