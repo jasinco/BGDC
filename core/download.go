@@ -7,52 +7,103 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/schollz/progressbar/v3"
 )
 
-func DownloadHandle(url string, path string) {
-	if strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://") {
-		if ok, resp := CheckParallel(url); !ok {
-			NormalDownload(url, path, resp)
+var Process int = 6
+
+func DownloadHandle(url string, path string, parallel bool) {
+
+	head, err := http.Head(url)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	path = PathHandle(path, *head)
+
+	if parallel {
+		if head.Header.Get("Accept-Ranges") == "bytes" && head.ContentLength != -1 {
+			seperate := bytesSeperator(Process, int(head.ContentLength))
+			prepareParallel(url, path, seperate, int(head.ContentLength))
 		} else {
-			PrepareParallel(url, path, resp)
+			log.Println("Couldn't use parallel download, switch to normal")
+			normalDownload(url, path)
 		}
 	} else {
-		log.Fatalln("Unsupport Protocal", url)
+		normalDownload(url, path)
+
 	}
+
 }
 
-func CheckParallel(url string) (bool, http.Response) {
-	if resp, err := http.Head(url); err == nil && resp.Header.Get("Accept-Ranges") == "bytes" && resp.ContentLength != -1 {
-		return true, *resp
-	} else if err != nil {
-		log.Fatalln(err)
+func PathHandle(path string, head http.Response) string {
+	var destination string
+	if path == "" {
+		if name := head.Header.Get("Content-Disposition"); name != "" {
+			destination = strings.Split(name, "filename=")[1] // Support by website
+		} else {
+			destination = head.Request.URL.Path[strings.LastIndex(head.Request.URL.Path, "/")+1:] // Get last word of url
+		}
 	} else {
-		return false, *resp
+		if validateDirectory(path) {
+			destination = path
+		} else {
+			log.Fatal("It's a directory")
+		}
 	}
-	return false, http.Response{}
+	return destination
 }
 
-func validateDestination(destination string) bool {
+func validateDirectory(destination string) bool {
 	inf, err := os.Stat(destination)
 	return !(err == nil && inf.IsDir())
+}
+
+func normalDownload(url string, path string) {
+	var resp http.Response
+
+	{
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+		tempresp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Fatal(err)
+		}
+		resp = *tempresp
+	}
+
+	file, err := os.Create(path)
+
+	if err != nil {
+		resp.Body.Close()
+		log.Fatal(err)
+	}
+	bar := progressbar.DefaultBytes(resp.ContentLength, path)
+	io.Copy(io.MultiWriter(file, bar), resp.Body)
+	bar.Close()
+	file.Close()
+	resp.Body.Close()
 }
 
 func bytesSeperator(process int, length int) []string {
 
 	bytesSeperate := make([]string, process)
 
-	// use Arithmetic progression to caculate the postion of requests' byte
+	// use Arithmetic progression to caculate the position of requests' byte
 	// Information https://en.wikipedia.org/wiki/Arithmetic_progression
 	d := int(math.Floor(float64(length) / float64(process)))
 	for i := 0; i < process; i++ {
 		start := 0 + d*i
-		finish := d - 1 + i*d
+		end := d - 1 + i*d
 		if i != process-1 {
-			bytesSeperate[i] = fmt.Sprintf("%d-%d", start, finish)
+			bytesSeperate[i] = fmt.Sprintf("%d-%d", start, end)
 		} else {
 			bytesSeperate[i] = fmt.Sprintf("%d-", start)
 		}
@@ -60,112 +111,72 @@ func bytesSeperator(process int, length int) []string {
 	return bytesSeperate
 }
 
-func NormalDownload(url string, path string, head http.Response) {
-	resp, err := http.Get(url)
+func prepareParallel(url string, path string, bytesRange []string, contentLength int) {
 
-	if err == nil && resp.StatusCode == 200 {
+	tempfileList := make([]string, Process)
 
-		destination := pathSolving(path, head)
-
-		fmt.Println("Save to", destination)
-
-		f, _ := os.Create(destination)
-		defer f.Close()
-
-		bar := progressbar.DefaultBytes(resp.ContentLength, "Download")
-
-		io.Copy(io.MultiWriter(f, bar), resp.Body)
-
-	} else {
-		log.Fatal("HTTP", resp.StatusCode, err)
+	dir, err := os.MkdirTemp(os.TempDir(), "BGD")
+	if err != nil {
+		log.Fatal(err)
 	}
-	resp.Body.Close()
+
+	var wg sync.WaitGroup
+	wg.Add(Process)
+
+	bar := progressbar.DefaultBytes(int64(contentLength), "Download")
+
+	f, err := os.Create(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for i, index := range bytesRange {
+		tempfileList[i] = filepath.Join(dir, "BGD-"+strconv.Itoa(i)+".dtemp")
+		go parallelDownload(url, tempfileList[i], bar, &wg, index)
+	}
+	wg.Wait()
+
+	for _, index := range tempfileList {
+		file, _ := os.OpenFile(index, os.O_RDONLY, 0777)
+		io.Copy(f, file)
+		file.Close()
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		log.Fatal(err)
+	}
+
 }
 
-type parallelReturnObj struct {
-	file string
-	id   int
-}
+func parallelDownload(url string, path string, bar *progressbar.ProgressBar, wg *sync.WaitGroup, bytesRange string) {
+	var resp http.Response
 
-func pathSolving(path string, head http.Response) string {
-
-	var destination string
-
-	if path == "" {
-		if name := head.Header.Get("Content-Disposition"); name != "" {
-			destination = strings.Split(name, "filename=")[1]
-		} else {
-			destination = head.Request.URL.Path[strings.LastIndex(head.Request.URL.Path, "/")+1:]
+	{
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			log.Fatal(err)
 		}
-	} else {
-		if validateDestination(path) {
-			destination = path
-		} else {
-			log.Fatal(path, " is a directory")
+		req.Header.Set("Range", "bytes="+bytesRange)
+		tempresp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Fatal(err)
 		}
-	}
-	return destination
-}
-
-func PrepareParallel(url string, path string, head http.Response) {
-	sep := bytesSeperator(6, int(head.ContentLength))
-
-	destination := pathSolving(path, head)
-
-	fmt.Println("Save to", destination)
-
-	parallelReturn := make(chan parallelReturnObj)
-
-	bar := progressbar.DefaultBytes(head.ContentLength, "Download")
-
-	for idx, i := range sep { // Parallel
-		go parallelDownload(url, i, idx, bar, parallelReturn)
+		resp = *tempresp
 	}
 
-	prReturn := make([]string, 6) // Get return from other progress
-	for i := 0; i < 6; i++ {
-		probj := <-parallelReturn
-		prReturn[probj.id] = probj.file
-	}
+	file, err := os.Create(path)
 
-	file, err := os.Create(destination) // Create file
 	if err != nil {
+		resp.Body.Close()
 		log.Fatal(err)
 	}
 
-	for _, i := range prReturn {
-		tempf, _ := os.OpenFile(i, os.O_RDONLY, 0777) // Open temp file
-		io.Copy(file, tempf)
-		tempf.Close()
-		os.Remove(i)
+	if resp.StatusCode != 206 {
+		log.Fatal("HTTP ", resp.StatusCode, " does not support parallel")
 	}
 
-}
-
-func parallelDownload(url string, bytesRange string, id int, bar *progressbar.ProgressBar, parallelReturn chan parallelReturnObj) {
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Add("Range", "bytes="+bytesRange)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if resp.StatusCode != 206 { // bytes support, Check MDN doc
-		log.Fatal("HTTP", resp.StatusCode, "Does not support parallel")
-	}
-
-	prReturn := new(parallelReturnObj)
-
-	f, err := os.CreateTemp(os.TempDir(), "BGD-"+strconv.Itoa(id)+"-*.dtmp")
-	if err != nil {
-		log.Fatal(err)
-	}
-	prReturn.file = f.Name()
-	prReturn.id = id
-
-	io.Copy(io.MultiWriter(f, bar), resp.Body)
-
-	f.Close()
+	io.Copy(io.MultiWriter(file, bar), resp.Body)
+	bar.Close()
+	file.Close()
 	resp.Body.Close()
-	parallelReturn <- *prReturn
-
+	wg.Done()
 }
