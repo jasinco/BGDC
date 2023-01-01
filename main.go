@@ -2,18 +2,20 @@ package main
 
 import (
 	"flag"
+	"log"
+	"os"
 
 	"github.com/jasinco/BGDC/core"
 )
 
 var (
-	url      string
-	path     string
-	parallel bool
+	url         string
+	path        string
+	connections int
 )
 
 func init() {
-	flag.BoolVar(&parallel, "parallel", true, "Use Parallel or not")
+	flag.IntVar(&connections, "con", 6, "Connections")
 	flag.StringVar(&path, "o", "", "destination")
 }
 
@@ -21,5 +23,10 @@ func main() {
 	flag.Parse()
 	url = flag.Arg(0)
 
-	core.DownloadHandle(url, path, parallel)
+	if url == "" {
+		log.Print("URL is nil")
+		os.Exit(1)
+	}
+
+	core.DownloadHandle(url, path, connections)
 }
