@@ -90,7 +90,7 @@ func NormalDownload(client *http.Client, url string, path string, compressed boo
 	}
 }
 
-func bytesSeperator(process int, length int) []string {
+func allocatebyyes(process int, length int) []string {
 
 	bytesSeperate := make([]string, process)
 
